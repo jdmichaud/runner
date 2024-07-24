@@ -1,0 +1,8 @@
+- current_dir: ~/
+  command: ls
+- current_dir: ~/
+  command: bash -c 'exit 42'
+- current_dir: ~/
+  command: python3 -m http.server 4321
+- current_dir: ~/
+  command: echo "this is a very long command that better be truncated"

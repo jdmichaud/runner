@@ -1,0 +1,11 @@
+# To build a fully static executable
+# see https://stackoverflow.com/a/67616507/2603925
+# note that you need to add the --target option for this to work like: `--target x86_64-unknown-linux-gnu`.
+# See https://github.com/rust-lang/rust/issues/78210#issuecomment-714600426
+[build]
+rustflags = [
+  "-C", "target-feature=+crt-static",
+]
+# To build statically you need to provide the target.
+# To override this default target, do `cargo build --target <YOUR_TARGET>`
+target = "x86_64-unknown-linux-musl"
