@@ -1,17 +1,14 @@
 // cargo run -- serve tasks.test.yml
 // cargo run -- list
-#![allow(dead_code)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
 
-use std::os::unix::process::ExitStatusExt;
-use std::os::unix::net::{UnixStream, UnixListener};
-use std::env;
-use std::path::PathBuf;
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
+use std::env;
 use std::io::prelude::*;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::ExitStatusExt;
+use std::path::PathBuf;
 
 const DEFAULT_CONFIG: &str = include_str!("../default-config.yml");
 
@@ -56,26 +53,28 @@ enum Request {
 #[derive(Debug, Serialize, Deserialize)]
 enum Response {
   /// Job list
-  List { jobs: Vec<JobRepr> },
+  List {
+    jobs: Vec<JobRepr>,
+  },
   None,
 }
 
-
 #[derive(Debug, Serialize, Deserialize)]
-struct ConfigRepr {
-}
+struct ConfigRepr {}
 
 #[derive(Debug)]
-struct Config {
-}
+struct Config {}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Task {
   current_dir: String,
   command: String,
+  restart: Option<bool>,
+  restart_delay: Option<u64>,
+  restart_max: Option<usize>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 enum ExitStatusRepr {
   Code(u8),
   Signal(i32),
@@ -97,8 +96,8 @@ struct Job {
   child: std::process::Child,
   stdout_path: String,
   stderr_path: String,
+  restarted: usize,
 }
-
 
 // struct DefaultFolders<'a> {
 //   config: &'a Config,
@@ -119,9 +118,11 @@ struct Job {
 // }
 
 fn get_config(opt: &Opt) -> Result<Config> {
-  let default_config_file_path: String =
-    env::var("XDG_CONFIG_HOME").unwrap_or(env::var("HOME")? + "/.config/") +
-    "/" + env!("CARGO_PKG_NAME") + "/config.yaml";
+  let default_config_file_path: String = env::var("XDG_CONFIG_HOME")
+    .unwrap_or(env::var("HOME")? + "/.config/")
+    + "/"
+    + env!("CARGO_PKG_NAME")
+    + "/config.yaml";
 
   // Load the config. We first check if a config file was provided as an option
   let config_content: String = if let Some(config_file) = &opt.config {
@@ -149,14 +150,14 @@ fn get_config(opt: &Opt) -> Result<Config> {
     std::process::exit(0);
   }
 
-  let config_repr: ConfigRepr = serde_yaml::from_str(&config_content)?;
+  let _config_repr: ConfigRepr = serde_yaml::from_str(&config_content)?;
 
   let config = Config {};
 
   Ok(config)
 }
 
-fn start_task(task: &Task) -> Result<Job> {
+fn start_task(task: &Task) -> Result<(std::process::Child, PathBuf, PathBuf)> {
   use shlex::Shlex;
 
   let mut split = Shlex::new(&task.command);
@@ -164,19 +165,23 @@ fn start_task(task: &Task) -> Result<Job> {
 
   let current_dir = shellexpand::full(&task.current_dir).unwrap();
   if !std::path::Path::new(current_dir.as_ref()).exists() {
-    anyhow::bail!("provided current directory for {}: {} does not exists", &prog, &current_dir);
+    anyhow::bail!(
+      "provided current directory for {}: {} does not exists",
+      &prog,
+      &current_dir
+    );
   }
 
-  use std::iter;
-  use rand::{Rng, thread_rng};
   use rand::distributions::Alphanumeric;
+  use rand::Rng;
 
   let mut rng = rand::thread_rng();
   let random_suffix: String = std::iter::repeat(())
     .map(|()| rng.sample(Alphanumeric))
     .map(char::from)
     .take(5)
-    .collect();  let mut stdout_path = std::env::temp_dir();
+    .collect();
+  let mut stdout_path = std::env::temp_dir();
   stdout_path.push("out".to_string() + &random_suffix);
   let stdout = std::fs::File::create(&stdout_path)?;
   let mut stderr_path = std::env::temp_dir();
@@ -188,17 +193,13 @@ fn start_task(task: &Task) -> Result<Job> {
     .stdin(std::process::Stdio::null())
     .args(split.collect::<Vec<String>>())
     .current_dir(current_dir.as_ref())
-    .spawn() {
-      Ok(child) => child,
-      Err(e) => anyhow::bail!("could not start {}: {}", &prog, e),
-    };
+    .spawn()
+  {
+    Ok(child) => child,
+    Err(e) => anyhow::bail!("could not start {}: {}", &prog, e),
+  };
 
-  Ok(Job {
-    task: task.clone(),
-    child: child,
-    stdout_path: stdout_path.to_path_buf().to_string_lossy().to_string(),
-    stderr_path: stderr_path.to_path_buf().to_string_lossy().to_string(),
-  })
+  Ok((child, stdout_path, stderr_path))
 }
 
 fn signal_to_string(signal: i32) -> String {
@@ -234,11 +235,15 @@ fn signal_to_string(signal: i32) -> String {
     29 => "SIGIO",
     30 => "SIGPWR",
     _ => "UNKNOWN SIGNAL",
-  }).to_string()
+  })
+  .to_string()
 }
 
 fn render(jobs: &Vec<JobRepr>) {
-  println!("{: <37} {: <13} {: <13} {: <6} {: <7}", "COMMAND", "STDOUT", "STDERR", "PID", "STATUS");
+  println!(
+    "{: <37} {: <13} {: <13} {: <6} {: <7}",
+    "COMMAND", "STDOUT", "STDERR", "PID", "STATUS"
+  );
   for job in jobs {
     let status = match job.status {
       ExitStatusRepr::Code(code) => code.to_string(),
@@ -250,8 +255,14 @@ fn render(jobs: &Vec<JobRepr>) {
     } else {
       job.task.command.to_string()
     };
-    println!("{: <37} {: <13} {: <13} {: <6} {: <7}",
-      command_truncated, job.stdout_path, job.stderr_path, job.pid.to_string(), status);
+    println!(
+      "{: <37} {: <13} {: <13} {: <6} {: <7}",
+      command_truncated,
+      job.stdout_path,
+      job.stderr_path,
+      job.pid.to_string(),
+      status
+    );
   }
 }
 
@@ -280,17 +291,36 @@ impl Drop for Job {
   }
 }
 
-fn serve(config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Result<()> {
+fn serve(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Result<()> {
   // Starting the tasks
-  let task_file = std::fs::read_to_string(task_file_path)
-    .or_else(|e| Err(anyhow::anyhow!("could not open {:?}: {}", &task_file_path, e)))?;
-  let tasks: Vec<Task> = serde_yaml::from_str(&task_file)
-    .or_else(|e| Err(anyhow::anyhow!("could not parse {:?}: {}", &task_file_path, e)))?;
-  let jobs: std::sync::Arc<std::sync::Mutex<Vec<Job>>> = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+  let task_file = std::fs::read_to_string(task_file_path).or_else(|e| {
+    Err(anyhow::anyhow!(
+      "could not open {:?}: {}",
+      &task_file_path,
+      e
+    ))
+  })?;
+  let tasks: Vec<Task> = serde_yaml::from_str(&task_file).or_else(|e| {
+    Err(anyhow::anyhow!(
+      "could not parse {:?}: {}",
+      &task_file_path,
+      e
+    ))
+  })?;
+  let jobs: std::sync::Arc<std::sync::Mutex<Vec<Job>>> =
+    std::sync::Arc::new(std::sync::Mutex::new(vec![]));
   {
     let mut jobs = jobs.lock().unwrap();
     for task in tasks {
-      let _ = jobs.push(start_task(&task)?);
+      let (child, stdout_path, stderr_path) = start_task(&task)?;
+
+      let _ = jobs.push(Job {
+        task: task.clone(),
+        child: child,
+        stdout_path: stdout_path.to_path_buf().to_string_lossy().to_string(),
+        stderr_path: stderr_path.to_path_buf().to_string_lossy().to_string(),
+        restarted: 0,
+      });
     }
     println!("started with {} jobs", jobs.len());
 
@@ -298,31 +328,87 @@ fn serve(config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Result
       std::fs::remove_file(&socket_path)?;
     }
   }
+
+  use std::sync::atomic::{AtomicBool, Ordering};
+  let running: std::sync::Arc<AtomicBool> = std::sync::Arc::new(AtomicBool::new(true));
+
+  {
+    let running_clone = running.clone();
+    let jobsclone = jobs.clone();
+    // Watch the children
+    std::thread::spawn(move || {
+      loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if running_clone.load(Ordering::Relaxed) == false {
+          // We can seem to be able to move the thread_handle in the ctrlc handler
+          // so we will just shutdown from the thread.
+          std::process::exit(0);
+        }
+        // Check if process need to be restarted
+        let nb_jobs = jobsclone.lock().unwrap().len();
+        for i in 0..nb_jobs {
+          // for job in jobsclone.lock().unwrap().iter_mut() {
+          let (status, restart, restart_delay, restart_max, restarted) = {
+            let job = &mut jobsclone.lock().unwrap()[i];
+            (
+              get_status(&mut job.child),
+              job.task.restart.unwrap_or(false),
+              job.task.restart_delay.unwrap_or(1),
+              job.task.restart_max.unwrap_or(0),
+              job.restarted,
+            )
+          };
+
+          if restart && status != ExitStatusRepr::None && (restart_max == 0 || restart_max > restarted) {
+            std::thread::sleep(std::time::Duration::from_secs(restart_delay));
+            let job = &mut jobsclone.lock().unwrap()[i];
+            println!(
+              "job {:?} exited with {:?}, restarting {restarted}/{}",
+              job.task.command, status, if restart_max == 0 { "∞".to_string() } else { restart_max.to_string() }
+            );
+            let (child, stdout_path, stderr_path) = start_task(&job.task).unwrap();
+            job.child = child;
+            job.stdout_path = stdout_path.to_path_buf().to_string_lossy().to_string();
+            job.stderr_path = stderr_path.to_path_buf().to_string_lossy().to_string();
+            job.restarted += 1;
+          }
+        }
+      }
+    });
+  }
+
+  {
+    let jobsclone = jobs.clone();
+    ctrlc::set_handler(move || {
+      println!("shutting down...");
+      print!("killing ");
+      for job in jobsclone.lock().unwrap().iter_mut() {
+        print!("{} ", job.child.id());
+        let _ = job.child.kill();
+      }
+      running.store(false, Ordering::Relaxed);
+      println!("");
+    })
+    .expect("Error setting Ctrl-C handler");
+  }
+
   // Listening to command
-  let listener = UnixListener::bind(socket_path)
-    .or_else(|e| Err(anyhow::anyhow!("could not bind to socket {}: {}", socket_path, e)))?;
-
-  let jobsclone = jobs.clone();
-  ctrlc::set_handler(move || {
-    println!("shutting down...");
-    print!("killing ");
-    for job in jobsclone.lock().unwrap().iter_mut() {
-      print!("{} ", job.child.id());
-      let _ = job.child.kill();
-    }
-    println!("");
-    std::process::exit(0);
-  }).expect("Error setting Ctrl-C handler");
-
+  let listener = UnixListener::bind(socket_path).or_else(|e| {
+    Err(anyhow::anyhow!(
+      "could not bind to socket {}: {}",
+      socket_path,
+      e
+    ))
+  })?;
+  println!("Listening to {socket_path}");
   loop {
-    println!("Listening to {socket_path}");
     match listener.accept() {
-      Ok((mut socket, addr)) => {
+      Ok((mut socket, _addr)) => {
         // Wait for the client to send a command for 3 seconds and then timeout
         if let Err(e) = socket.set_read_timeout(Some(std::time::Duration::new(3, 0))) {
           eprintln!("warning: could not set a timeout on {}: {}", socket_path, e);
         }
-        println!("Connected to {addr:?}");
+        println!("Connected to client");
         match receive(&mut socket)? {
           Request::List => {
             let mut sjobs: Vec<JobRepr> = vec![];
@@ -344,7 +430,7 @@ fn serve(config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Result
         }
       }
       Err(e) => {
-        println!("warning: could not connect: {e:?}");
+        println!("warning: accept could not connect: {e:?}");
         break;
       }
     };
@@ -384,14 +470,14 @@ fn main() -> Result<()> {
     Some(Command::List) | None => {
       // By default, just lists the tasks
       let mut socket = UnixStream::connect(socket_path)?;
-      send(&mut socket, &Request::List{})?;
+      send(&mut socket, &Request::List {})?;
       receive(&mut socket)?
     }
   };
 
   match response {
     Some(Response::List { jobs }) => render(&jobs),
-    Some(Response::None) | None => {},
+    Some(Response::None) | None => {}
   }
 
   Ok(())

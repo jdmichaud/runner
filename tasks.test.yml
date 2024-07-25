@@ -4,5 +4,11 @@
   command: bash -c 'exit 42'
 - current_dir: ~/
   command: python3 -m http.server 4321
+  restart: true
+  restart_delay: 10
 - current_dir: ~/
   command: echo "this is a very long command that better be truncated"
+- current_dir: ~/
+  command: sleep 2s
+  restart: true
+  restart_max: 3
