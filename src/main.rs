@@ -1,7 +1,6 @@
 // cargo run -- serve tasks.test.yml
 // cargo run -- list
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -10,6 +9,7 @@ use std::io::prelude::*;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const DEFAULT_CONFIG: &str = include_str!("../default-config.yml");
 
@@ -359,9 +359,7 @@ fn serve(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
       loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
         if running_clone.load(Ordering::Relaxed) == false {
-          // We can seem to be able to move the thread_handle in the ctrlc handler
-          // so we will just shutdown from the thread.
-          std::process::exit(0);
+          return;
         }
         // Check if process need to be restarted
         let nb_jobs = jobsclone.lock().unwrap().len();
@@ -378,12 +376,21 @@ fn serve(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
             )
           };
 
-          if restart && status != ExitStatusRepr::None && (restart_max == 0 || restart_max > restarted) {
+          if restart
+            && status != ExitStatusRepr::None
+            && (restart_max == 0 || restart_max > restarted)
+          {
             std::thread::sleep(std::time::Duration::from_secs(restart_delay));
             let job = &mut jobsclone.lock().unwrap()[i];
             println!(
               "job {:?} exited with {:?}, restarting {restarted}/{}",
-              job.task.command, status, if restart_max == 0 { "∞".to_string() } else { restart_max.to_string() }
+              job.task.command,
+              status,
+              if restart_max == 0 {
+                "∞".to_string()
+              } else {
+                restart_max.to_string()
+              }
             );
             let (child, stdout_path, stderr_path) = start_task(&job.task).unwrap();
             job.child = child;
@@ -399,7 +406,10 @@ fn serve(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
   {
     let jobsclone = jobs.clone();
     let running_clone = running.clone();
-    ctrlc::set_handler(move || stop(&mut jobsclone.lock().unwrap(), running_clone.clone()))
+    ctrlc::set_handler(move || {
+      stop(&mut jobsclone.lock().unwrap(), running_clone.clone());
+      std::process::exit(0);
+    })
     .expect("Error setting Ctrl-C handler");
   }
 
@@ -437,9 +447,10 @@ fn serve(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
               eprintln!("warning: error writing to client ({e:?})");
               continue;
             }
-          },
+          }
           Request::Stop => {
-            stop(&mut jobs.lock().unwrap(), running.clone())
+            stop(&mut jobs.lock().unwrap(), running.clone());
+            std::process::exit(0);
           }
         }
       }
