@@ -284,10 +284,10 @@ fn get_status(child: &mut std::process::Child) -> ExitStatusRepr {
   }
 }
 
-impl Drop for Job {
-  fn drop(&mut self) {
-    println!("kill {}", self.child.id());
-    let _ = self.child.kill();
+pub fn kill_gracefully(child: &std::process::Child) {
+  use libc;
+  unsafe {
+    libc::kill(child.id() as i32, libc::SIGTERM);
   }
 }
 
@@ -384,6 +384,10 @@ fn serve(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
       print!("killing ");
       for job in jobsclone.lock().unwrap().iter_mut() {
         print!("{} ", job.child.id());
+        kill_gracefully(&job.child);
+        // Wait for a bit
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Force jukk
         let _ = job.child.kill();
       }
       running.store(false, Ordering::Relaxed);
