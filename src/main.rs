@@ -1,6 +1,7 @@
 // cargo run -- serve tasks.test.yml
 // cargo run -- list
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -42,12 +43,16 @@ enum Command {
   Serve { task_file_path: PathBuf },
   /// List the jobs
   List,
+  /// Stop the server
+  Stop,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Request {
   /// List the jobs
   List,
+  /// Stop the server
+  Stop,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -291,6 +296,21 @@ pub fn kill_gracefully(child: &std::process::Child) {
   }
 }
 
+fn stop(jobs: &mut Vec<Job>, running: std::sync::Arc<AtomicBool>) {
+  println!("shutting down...");
+  print!("killing ");
+  for job in jobs.iter_mut() {
+    print!("{} ", job.child.id());
+    kill_gracefully(&job.child);
+    // Wait for a bit
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Force jukk
+    let _ = job.child.kill();
+  }
+  running.store(false, Ordering::Relaxed);
+  println!("");
+}
+
 fn serve(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Result<()> {
   // Starting the tasks
   let task_file = std::fs::read_to_string(task_file_path).or_else(|e| {
@@ -329,7 +349,6 @@ fn serve(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
     }
   }
 
-  use std::sync::atomic::{AtomicBool, Ordering};
   let running: std::sync::Arc<AtomicBool> = std::sync::Arc::new(AtomicBool::new(true));
 
   {
@@ -379,20 +398,8 @@ fn serve(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
 
   {
     let jobsclone = jobs.clone();
-    ctrlc::set_handler(move || {
-      println!("shutting down...");
-      print!("killing ");
-      for job in jobsclone.lock().unwrap().iter_mut() {
-        print!("{} ", job.child.id());
-        kill_gracefully(&job.child);
-        // Wait for a bit
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        // Force jukk
-        let _ = job.child.kill();
-      }
-      running.store(false, Ordering::Relaxed);
-      println!("");
-    })
+    let running_clone = running.clone();
+    ctrlc::set_handler(move || stop(&mut jobsclone.lock().unwrap(), running_clone.clone()))
     .expect("Error setting Ctrl-C handler");
   }
 
@@ -430,6 +437,9 @@ fn serve(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
               eprintln!("warning: error writing to client ({e:?})");
               continue;
             }
+          },
+          Request::Stop => {
+            stop(&mut jobs.lock().unwrap(), running.clone())
           }
         }
       }
@@ -476,6 +486,11 @@ fn main() -> Result<()> {
       let mut socket = UnixStream::connect(socket_path)?;
       send(&mut socket, &Request::List {})?;
       receive(&mut socket)?
+    }
+    Some(Command::Stop) => {
+      let mut socket = UnixStream::connect(socket_path)?;
+      send(&mut socket, &Request::Stop {})?;
+      None
     }
   };
 
