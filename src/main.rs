@@ -4,6 +4,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::collections::HashMap;
 use std::env;
 use std::io::prelude::*;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -289,20 +291,104 @@ fn get_status(child: &mut std::process::Child) -> ExitStatusRepr {
   }
 }
 
-pub fn kill_gracefully(child: &std::process::Child) {
+pub fn kill(pid: u32, signal: i32) {
   use libc;
   unsafe {
-    libc::kill(child.id() as i32, libc::SIGTERM);
+    libc::kill(pid as i32, signal);
   }
+}
+
+// Quick and dirty piece of codes that list all the descendants of a particular process
+fn get_all_descendant_pid() -> Vec<u32> {
+  fn get_process_parent(status_path: &std::path::Path) -> Option<(u32, u32)> {
+    let mut pid: Option<u32> = None;
+    let mut ppid: Option<u32> = None;
+
+    let mut reader = std::io::BufReader::new(std::fs::File::open(status_path).unwrap());
+    loop {
+      let mut linebuf = String::new();
+      match reader.read_line(&mut linebuf) {
+        Ok(_) => {
+          if linebuf.is_empty() {
+            break;
+          }
+          let parts: Vec<&str> = linebuf[..].splitn(2, ':').collect();
+          if parts.len() == 2 {
+            let key = parts[0].trim();
+            let value = parts[1].trim();
+            match key {
+              "Pid" => pid = value.parse().ok(),
+              "PPid" => ppid = value.parse().ok(),
+              _ => (),
+            }
+          }
+        }
+        Err(_) => break,
+      }
+    }
+    return if pid.is_some() && ppid.is_some() {
+      Some((pid.unwrap(), ppid.unwrap()))
+    } else {
+      None
+    };
+  }
+
+  fn build_descendants(
+    processes_map: &HashMap<u32, Vec<u32>>,
+    descendants: &mut Vec<u32>,
+    pid: u32,
+  ) {
+    let children = processes_map.get(&pid).unwrap();
+    for child in children {
+      descendants.push(*child);
+      if processes_map.contains_key(child) {
+        build_descendants(processes_map, descendants, *child);
+      }
+    }
+  }
+
+  let proc_directory = std::path::Path::new("/proc");
+
+  // find potential process directories under /proc
+  let mut processes_map: HashMap<u32, Vec<u32>> = HashMap::new();
+  let proc_directory_contents = std::fs::read_dir(&proc_directory).unwrap();
+  for entry in proc_directory_contents {
+    let entry_path = entry.unwrap().path();
+    if std::fs::metadata(entry_path.as_path()).unwrap().is_dir() {
+      let status_path = entry_path.join("status");
+      if let Ok(metadata) = std::fs::metadata(status_path.as_path()) {
+        if metadata.is_file() {
+          if let Some((pid, ppid)) = get_process_parent(status_path.as_path()) {
+            match processes_map.entry(ppid) {
+              Vacant(entry) => {
+                entry.insert(vec![pid]);
+              }
+              Occupied(mut entry) => {
+                entry.get_mut().push(pid);
+              }
+            };
+          }
+        }
+      }
+    }
+  }
+
+  let mut descendants: Vec<u32> = vec![];
+  build_descendants(&processes_map, &mut descendants, std::process::id());
+
+  return descendants;
 }
 
 fn stop(jobs: &mut Vec<Job>, running: std::sync::Arc<AtomicBool>) {
   println!("shutting down...");
+
   // Stop the respawning thread
   running.store(false, Ordering::Relaxed);
   // We will first try to interrupt the child processes
   let mut still_running = true;
   let mut try_count = 0;
+  // Get the children and the grandchildren
+  let descendants = get_all_descendant_pid();
   while still_running && try_count < 3 {
     if try_count > 0 {
       // Alreay asked the processes to quit, wait for a bit
@@ -313,22 +399,22 @@ fn stop(jobs: &mut Vec<Job>, running: std::sync::Arc<AtomicBool>) {
     for job in jobs.iter_mut() {
       if get_status(&mut job.child) == ExitStatusRepr::None {
         println!("interrupt {}", job.child.id());
-        kill_gracefully(&job.child);
+        kill(job.child.id(), libc::SIGTERM);
         // If at least one process is still alive, we kill asking him to quit
         still_running = true;
       }
     }
   }
   if still_running && try_count >= 3 {
+    std::thread::sleep(std::time::Duration::from_millis(800));
     // Some recalcitrant processes are still running
-    for job in jobs.iter_mut() {
-      if get_status(&mut job.child) == ExitStatusRepr::None {
-        println!("forcing quit {}", job.child.id());
-        // Force kill
-        let _ = job.child.kill();
-      }
+    for pid in descendants {
+      println!("forcing quit {}", pid);
+      // Force kill
+      kill(pid, libc::SIGKILL);
     }
   }
+  let _ = std::io::stdout().flush();
 }
 
 fn start(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Result<()> {
