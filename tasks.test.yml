@@ -12,3 +12,6 @@
   command: sleep 2s
   restart: true
   restart_max: 3
+- current_dir: ~/
+  # Check that runner kills all its descendent when terminating
+  command: bash -c 'python3 -m http.server 8888'

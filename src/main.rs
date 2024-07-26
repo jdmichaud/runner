@@ -1,5 +1,5 @@
 // cargo run -- start tasks.test.yml
-// start run -- list
+// cargo run -- list
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -298,19 +298,37 @@ pub fn kill_gracefully(child: &std::process::Child) {
 
 fn stop(jobs: &mut Vec<Job>, running: std::sync::Arc<AtomicBool>) {
   println!("shutting down...");
-  print!("killing ");
-  let _ = std::io::stdout().flush();
-  for job in jobs.iter_mut() {
-    print!("{} ", job.child.id());
-    let _ = std::io::stdout().flush();
-    kill_gracefully(&job.child);
-    // Wait for a bit
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    // Force jukk
-    let _ = job.child.kill();
-  }
+  // Stop the respawning thread
   running.store(false, Ordering::Relaxed);
-  println!("");
+  // We will first try to interrupt the child processes
+  let mut still_running = true;
+  let mut try_count = 0;
+  while still_running && try_count < 3 {
+    if try_count > 0 {
+      // Alreay asked the processes to quit, wait for a bit
+      std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    try_count += 1;
+    still_running = false;
+    for job in jobs.iter_mut() {
+      if get_status(&mut job.child) == ExitStatusRepr::None {
+        println!("interrupt {}", job.child.id());
+        kill_gracefully(&job.child);
+        // If at least one process is still alive, we kill asking him to quit
+        still_running = true;
+      }
+    }
+  }
+  if still_running && try_count >= 3 {
+    // Some recalcitrant processes are still running
+    for job in jobs.iter_mut() {
+      if get_status(&mut job.child) == ExitStatusRepr::None {
+        println!("forcing quit {}", job.child.id());
+        // Force kill
+        let _ = job.child.kill();
+      }
+    }
+  }
 }
 
 fn start(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Result<()> {
