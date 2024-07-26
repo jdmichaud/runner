@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const DEFAULT_CONFIG: &str = include_str!("../default-config.yml");
 
-/// A bookmark manager
+/// A task runner
 #[derive(Debug, Parser)]
 #[command(
   name = format!("{} ({} {})", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"), env!("GIT_HASH")),
@@ -30,8 +30,8 @@ struct Opt {
   config: Option<PathBuf>,
   /// Print the used configuration and exit.
   /// You can use this option to initialize the default config file with:
-  ///   mkdir -p ~/.config/bookmark/
-  ///   bookmark --print-config ~/.config/bookmark/config.yaml
+  ///   mkdir -p ~/.config/runner/
+  ///   runner --print-config ~/.config/runner/config.yaml
   #[arg(long, verbatim_doc_comment)]
   print_config: bool,
 
@@ -41,11 +41,11 @@ struct Opt {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-  /// Adds a bookmark
+  /// Starts the tasks
   Start { task_file_path: PathBuf },
   /// List the jobs
   List,
-  /// Stop server
+  /// Stop the tasks
   Stop,
 }
 
@@ -117,7 +117,7 @@ struct Job {
 
 //   pub fn get_data_folder(self: &Self) -> Result<PathBuf> {
 //     let default_config_data_path: String =
-//       env::var("XDG_DATA_HOME").unwrap_or(env::var("HOME")? + "/.local/share") + "/bookmark/";
+//       env::var("XDG_DATA_HOME").unwrap_or(env::var("HOME")? + "/.local/share") + "/runner/";
 //     std::fs::create_dir_all(&default_config_data_path)?;
 //     let path = std::path::PathBuf::from(&default_config_data_path);
 //     return Ok(path);
