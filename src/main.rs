@@ -405,14 +405,12 @@ fn stop(jobs: &mut Vec<Job>, running: std::sync::Arc<AtomicBool>) {
       }
     }
   }
-  if still_running && try_count >= 3 {
-    std::thread::sleep(std::time::Duration::from_millis(800));
-    // Some recalcitrant processes are still running
-    for pid in descendants {
-      println!("forcing quit {}", pid);
-      // Force kill
-      kill(pid, libc::SIGKILL);
-    }
+
+  std::thread::sleep(std::time::Duration::from_millis(200));
+  println!("clearing {:?}", descendants);
+  for pid in descendants {
+    // Force kill
+    kill(pid, libc::SIGKILL);
   }
   let _ = std::io::stdout().flush();
 }
