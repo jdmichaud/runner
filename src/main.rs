@@ -1,5 +1,5 @@
-// cargo run -- serve tasks.test.yml
-// cargo run -- list
+// cargo run -- start tasks.test.yml
+// start run -- list
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -40,10 +40,10 @@ struct Opt {
 #[derive(Debug, Subcommand)]
 enum Command {
   /// Adds a bookmark
-  Serve { task_file_path: PathBuf },
+  Start { task_file_path: PathBuf },
   /// List the jobs
   List,
-  /// Stop the server
+  /// Stop server
   Stop,
 }
 
@@ -51,7 +51,7 @@ enum Command {
 enum Request {
   /// List the jobs
   List,
-  /// Stop the server
+  /// Stop server
   Stop,
 }
 
@@ -299,8 +299,10 @@ pub fn kill_gracefully(child: &std::process::Child) {
 fn stop(jobs: &mut Vec<Job>, running: std::sync::Arc<AtomicBool>) {
   println!("shutting down...");
   print!("killing ");
+  let _ = std::io::stdout().flush();
   for job in jobs.iter_mut() {
     print!("{} ", job.child.id());
+    let _ = std::io::stdout().flush();
     kill_gracefully(&job.child);
     // Wait for a bit
     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -311,7 +313,7 @@ fn stop(jobs: &mut Vec<Job>, running: std::sync::Arc<AtomicBool>) {
   println!("");
 }
 
-fn serve(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Result<()> {
+fn start(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Result<()> {
   // Starting the tasks
   let task_file = std::fs::read_to_string(task_file_path).or_else(|e| {
     Err(anyhow::anyhow!(
@@ -488,8 +490,8 @@ fn main() -> Result<()> {
 
   // We treat the commands here
   let response = match &opt.command {
-    Some(Command::Serve { task_file_path }) => {
-      serve(&config, &task_file_path, socket_path)?;
+    Some(Command::Start { task_file_path }) => {
+      start(&config, &task_file_path, socket_path)?;
       None
     }
     Some(Command::List) | None => {
