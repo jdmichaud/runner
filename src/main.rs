@@ -42,11 +42,16 @@ struct Opt {
 #[derive(Debug, Subcommand)]
 enum Command {
   /// Starts the tasks
-  Start { task_file_path: PathBuf },
+  Serve { task_file_path: PathBuf },
   /// List the jobs
   List,
-  /// Stop the tasks
-  Stop,
+  /// Stop the task identified by pid or if no pid is specified stop all
+  /// tasks and stop the server.
+  Stop { pid: Option<u32> },
+  /// Start a task
+  Start { pid: u32 },
+  /// Restart the task identified by pid
+  Restart { pid: u32 },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,6 +60,10 @@ enum Request {
   List,
   /// Stop server
   Stop,
+  /// Start a task
+  Start { pid: u32 },
+  /// Stop or kill a task
+  Kill { pid: u32 },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -63,6 +72,7 @@ enum Response {
   List {
     jobs: Vec<JobRepr>,
   },
+  Message { message: String },
   None,
 }
 
@@ -92,9 +102,12 @@ enum ExitStatusRepr {
 struct JobRepr {
   task: Task,
   pid: u32,
+  // None is running
   status: ExitStatusRepr,
   stdout_path: String,
   stderr_path: String,
+  // Was the job manually stopped
+  stopped: bool,
 }
 
 #[derive(Debug)]
@@ -104,6 +117,8 @@ struct Job {
   stdout_path: String,
   stderr_path: String,
   restarted: usize,
+  // Was the job manually stopped
+  stopped: bool,
 }
 
 // struct DefaultFolders<'a> {
@@ -299,7 +314,7 @@ pub fn kill(pid: u32, signal: i32) {
 }
 
 // Quick and dirty piece of codes that list all the descendants of a particular process
-fn get_all_descendant_pid() -> Vec<u32> {
+fn get_all_descendant_pid(pid: u32) -> Vec<u32> {
   fn get_process_parent(status_path: &std::path::Path) -> Option<(u32, u32)> {
     let mut pid: Option<u32> = None;
     let mut ppid: Option<u32> = None;
@@ -338,11 +353,12 @@ fn get_all_descendant_pid() -> Vec<u32> {
     descendants: &mut Vec<u32>,
     pid: u32,
   ) {
-    let children = processes_map.get(&pid).unwrap();
-    for child in children {
-      descendants.push(*child);
-      if processes_map.contains_key(child) {
-        build_descendants(processes_map, descendants, *child);
+    if let Some(children) = processes_map.get(&pid) {
+      for child in children {
+        descendants.push(*child);
+        if processes_map.contains_key(child) {
+          build_descendants(processes_map, descendants, *child);
+        }
       }
     }
   }
@@ -374,9 +390,34 @@ fn get_all_descendant_pid() -> Vec<u32> {
   }
 
   let mut descendants: Vec<u32> = vec![];
-  build_descendants(&processes_map, &mut descendants, std::process::id());
+  build_descendants(&processes_map, &mut descendants, pid);
 
   return descendants;
+}
+
+fn stop_a_job(job: &mut Job) {
+  let descendants = get_all_descendant_pid(job.child.id());
+  let mut still_running = true;
+  let mut try_count = 0;
+  while still_running && try_count < 3 {
+    if try_count > 0 {
+      // Alreay asked the processes to quit, wait for a bit
+      std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    try_count += 1;
+    still_running = false;
+    if get_status(&mut job.child) == ExitStatusRepr::None {
+      kill(job.child.id(), libc::SIGTERM);
+      // If at least one process is still alive, we kill asking him to quit
+      still_running = true;
+    }
+  }
+
+  std::thread::sleep(std::time::Duration::from_millis(200));
+  for pid in descendants {
+    // Force kill
+    kill(pid, libc::SIGKILL);
+  }
 }
 
 fn stop(jobs: &mut Vec<Job>, running: std::sync::Arc<AtomicBool>) {
@@ -388,7 +429,7 @@ fn stop(jobs: &mut Vec<Job>, running: std::sync::Arc<AtomicBool>) {
   let mut still_running = true;
   let mut try_count = 0;
   // Get the children and the grandchildren
-  let descendants = get_all_descendant_pid();
+  let descendants = get_all_descendant_pid(std::process::id());
   while still_running && try_count < 3 {
     if try_count > 0 {
       // Alreay asked the processes to quit, wait for a bit
@@ -444,6 +485,7 @@ fn start(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
         stdout_path: stdout_path.to_path_buf().to_string_lossy().to_string(),
         stderr_path: stderr_path.to_path_buf().to_string_lossy().to_string(),
         restarted: 0,
+        stopped: false,
       });
     }
     println!("started with {} jobs", jobs.len());
@@ -469,7 +511,7 @@ fn start(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
         let nb_jobs = jobsclone.lock().unwrap().len();
         for i in 0..nb_jobs {
           // for job in jobsclone.lock().unwrap().iter_mut() {
-          let (status, restart, restart_delay, restart_max, restarted) = {
+          let (status, restart, restart_delay, restart_max, restarted, stopped) = {
             let job = &mut jobsclone.lock().unwrap()[i];
             (
               get_status(&mut job.child),
@@ -477,12 +519,14 @@ fn start(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
               job.task.restart_delay.unwrap_or(1),
               job.task.restart_max.unwrap_or(0),
               job.restarted,
+              job.stopped,
             )
           };
 
           if restart
             && status != ExitStatusRepr::None
             && (restart_max == 0 || restart_max > restarted)
+            && !stopped
           {
             std::thread::sleep(std::time::Duration::from_secs(restart_delay));
             let job = &mut jobsclone.lock().unwrap()[i];
@@ -544,6 +588,7 @@ fn start(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
                 status: get_status(&mut job.child),
                 stdout_path: job.stdout_path.clone(),
                 stderr_path: job.stderr_path.clone(),
+                stopped: job.stopped,
               });
             }
 
@@ -554,8 +599,60 @@ fn start(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
           }
           Request::Stop => {
             stop(&mut jobs.lock().unwrap(), running.clone());
+            let _ = send(&mut socket, &Response::None);
             std::process::exit(0);
-          }
+          },
+          Request::Kill { pid } => {
+            let mut found = false;
+            for job in jobs.lock().unwrap().iter_mut() {
+              if job.child.id() == pid {
+                found = true;
+                job.stopped = true;
+                stop_a_job(job)
+              }
+              if get_status(&mut job.child) != ExitStatusRepr::None {
+                let message = format!("Job {} stopped", pid);
+                let _ = send(&mut socket, &Response::Message { message });
+              } else {
+                let message = format!("Couldn't either stop or kill job {}", pid);
+                let _ = send(&mut socket, &Response::Message { message });
+              }
+            }
+            if !found {
+              let message = format!("Couldn't find job {}", pid);
+              let _ = send(&mut socket, &Response::Message { message });
+            }
+          },
+          Request::Start { pid } => {
+            let mut found = false;
+            for job in jobs.lock().unwrap().iter_mut() {
+              if job.child.id() == pid {
+                found = true;
+                if get_status(&mut job.child) != ExitStatusRepr::None {
+                  // If the job is stopped, start it
+                  if let Ok((child, stdout_path, stderr_path)) = start_task(&job.task) {
+                    job.stopped = false;
+                    job.child = child;
+                    job.stdout_path = stdout_path.to_path_buf().to_string_lossy().to_string();
+                    job.stderr_path = stderr_path.to_path_buf().to_string_lossy().to_string();
+                    let message = format!("Job {} (formerly {}) started", job.child.id(), pid);
+                    let _ = send(&mut socket, &Response::Message { message });
+                  } else {
+                    let message = format!("Couldn't start job {}", pid);
+                    let _ = send(&mut socket, &Response::Message { message });
+                  }
+                } else {
+                  let message = format!("Job {} already running", pid);
+                  let _ = send(&mut socket, &Response::Message { message });
+                }
+                break;
+              }
+            }
+            if !found {
+              let message = format!("Couldn't find job {}", pid);
+              let _ = send(&mut socket, &Response::Message { message });
+            }
+          },
         }
       }
       Err(e) => {
@@ -592,7 +689,7 @@ fn main() -> Result<()> {
 
   // We treat the commands here
   let response = match &opt.command {
-    Some(Command::Start { task_file_path }) => {
+    Some(Command::Serve { task_file_path }) => {
       start(&config, &task_file_path, socket_path)?;
       None
     }
@@ -602,16 +699,34 @@ fn main() -> Result<()> {
       send(&mut socket, &Request::List {})?;
       receive(&mut socket)?
     }
-    Some(Command::Stop) => {
+    Some(Command::Stop { pid }) => {
       let mut socket = UnixStream::connect(socket_path)?;
-      send(&mut socket, &Request::Stop {})?;
-      None
+      if let Some(pid) = pid {
+        send(&mut socket, &Request::Kill { pid: *pid })?;
+      } else {
+        send(&mut socket, &Request::Stop {})?;
+      }
+      receive(&mut socket)?
+    }
+    Some(Command::Start { pid }) => {
+      let mut socket = UnixStream::connect(socket_path)?;
+      send(&mut socket, &Request::Start { pid: *pid })?;
+      receive(&mut socket)?
+    }
+    Some(Command::Restart { pid }) => {
+      let mut socket = UnixStream::connect(socket_path)?;
+      send(&mut socket, &Request::Kill { pid: *pid })?;
+      let _ = receive::<Response>(&mut socket);
+      let mut socket = UnixStream::connect(socket_path)?;
+      send(&mut socket, &Request::Start { pid: *pid })?;
+      receive(&mut socket)?
     }
   };
 
   match response {
     Some(Response::List { jobs }) => render(&jobs),
-    Some(Response::None) | None => {}
+    Some(Response::None) | None => {},
+    Some(Response::Message { message }) => println!("{}", message),
   }
 
   Ok(())
