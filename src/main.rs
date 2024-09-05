@@ -1,4 +1,4 @@
-// cargo run -- start tasks.test.yml
+// cargo run -- serve tasks.test.yml
 // cargo run -- list
 
 use anyhow::Result;
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::env;
 use std::io::prelude::*;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -85,6 +85,8 @@ struct Config {}
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Task {
   current_dir: String,
+  environment: Option<HashMap<String, String>>,
+  name: Option<String>,
   command: String,
   restart: Option<bool>,
   restart_delay: Option<u64>,
@@ -209,14 +211,20 @@ fn start_task(task: &Task) -> Result<(std::process::Child, PathBuf, PathBuf)> {
   let mut stderr_path = std::env::temp_dir();
   stderr_path.push("err".to_string() + &random_suffix);
   let stderr = std::fs::File::create(&stderr_path)?;
-  let child = match std::process::Command::new(&prog)
+  let mut command = std::process::Command::new(&prog);
+  let command = command
     .stdout(stdout)
     .stderr(stderr)
     .stdin(std::process::Stdio::null())
     .args(split.collect::<Vec<String>>())
-    .current_dir(current_dir.as_ref())
-    .spawn()
-  {
+    .current_dir(current_dir.as_ref());
+  if let Some(environment) = &task.environment {
+    command.envs(environment);
+  }
+  if let Some(name) = &task.name {
+    command.arg0(&name);
+  }
+  let child = match command.spawn() {
     Ok(child) => child,
     Err(e) => anyhow::bail!("could not start {}: {}", &prog, e),
   };
@@ -263,8 +271,8 @@ fn signal_to_string(signal: i32) -> String {
 
 fn render(jobs: &Vec<JobRepr>) {
   println!(
-    "{: <37} {: <13} {: <13} {: <6} {: <7}",
-    "COMMAND", "STDOUT", "STDERR", "PID", "STATUS"
+    "{: <13} {: <13} {: <13} {: <6} {: <7} {: <37}",
+    "NAME", "STDOUT", "STDERR", "PID", "STATUS", "COMMAND"
   );
   for job in jobs {
     let status = match job.status {
@@ -277,13 +285,23 @@ fn render(jobs: &Vec<JobRepr>) {
     } else {
       job.task.command.to_string()
     };
+    let name_truncated = if let Some(name) = &job.task.name {
+      if name.len() > 12 {
+        (&name[..9]).to_string() + "..."
+      } else {
+        name.to_string()
+      }
+    } else {
+      job.task.command.split(" ").collect::<Vec<&str>>()[0].to_string()
+    };
     println!(
-      "{: <37} {: <13} {: <13} {: <6} {: <7}",
-      command_truncated,
+      "{: <13} {: <13} {: <13} {: <6} {: <7} {: <37}",
+      name_truncated,
       job.stdout_path,
       job.stderr_path,
       job.pid.to_string(),
-      status
+      status,
+      command_truncated,
     );
   }
 }
