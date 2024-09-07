@@ -85,6 +85,8 @@ struct Config {}
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Task {
   current_dir: String,
+  stdout: Option<String>,
+  stderr: Option<String>,
   environment: Option<HashMap<String, String>>,
   name: Option<String>,
   command: String,
@@ -205,11 +207,21 @@ fn start_task(task: &Task) -> Result<(std::process::Child, PathBuf, PathBuf)> {
     .map(char::from)
     .take(5)
     .collect();
-  let mut stdout_path = std::env::temp_dir();
-  stdout_path.push("out".to_string() + &random_suffix);
+  let stdout_path = if let Some(stdout_path) = &task.stdout {
+    PathBuf::from(stdout_path)
+  } else {
+    let mut stdout_path = std::env::temp_dir();
+    stdout_path.push("out".to_string() + &random_suffix);
+    stdout_path
+  };
   let stdout = std::fs::File::create(&stdout_path)?;
-  let mut stderr_path = std::env::temp_dir();
-  stderr_path.push("err".to_string() + &random_suffix);
+  let stderr_path = if let Some(stderr_path) = &task.stderr {
+    PathBuf::from(stderr_path)
+  } else {
+    let mut stderr_path = std::env::temp_dir();
+    stderr_path.push("err".to_string() + &random_suffix);
+    stderr_path
+  };
   let stderr = std::fs::File::create(&stderr_path)?;
   let mut command = std::process::Command::new(&prog);
   let command = command
@@ -270,8 +282,16 @@ fn signal_to_string(signal: i32) -> String {
 }
 
 fn render(jobs: &Vec<JobRepr>) {
+  fn limit_str(s: &str, size: usize) -> String {
+    if s.len() > size {
+      (&s[..size - 3]).to_string() + "..."
+    } else {
+      s.to_string()
+    }
+  }
+
   println!(
-    "{: <13} {: <13} {: <13} {: <6} {: <7} {: <37}",
+    "{: <13} {: <13} {: <13} {: <7} {: <7} {: <37}",
     "NAME", "STDOUT", "STDERR", "PID", "STATUS", "COMMAND"
   );
   for job in jobs {
@@ -280,25 +300,19 @@ fn render(jobs: &Vec<JobRepr>) {
       ExitStatusRepr::Signal(signal) => signal_to_string(signal),
       ExitStatusRepr::None => "Running".to_string(),
     };
-    let command_truncated = if job.task.command.len() > 36 {
-      (&job.task.command[..33]).to_string() + "..."
-    } else {
-      job.task.command.to_string()
-    };
+    let command_truncated = limit_str(&job.task.command, 36);
     let name_truncated = if let Some(name) = &job.task.name {
-      if name.len() > 12 {
-        (&name[..9]).to_string() + "..."
-      } else {
-        name.to_string()
-      }
+      limit_str(name, 12)
     } else {
       job.task.command.split(" ").collect::<Vec<&str>>()[0].to_string()
     };
+    let stdout_truncated = limit_str(&job.stdout_path, 13);
+    let stderr_truncated = limit_str(&job.stderr_path, 13);
     println!(
-      "{: <13} {: <13} {: <13} {: <6} {: <7} {: <37}",
+      "{: <13} {: <13} {: <13} {: <7} {: <7} {: <37}",
       name_truncated,
-      job.stdout_path,
-      job.stderr_path,
+      stdout_truncated,
+      stderr_truncated,
       job.pid.to_string(),
       status,
       command_truncated,
@@ -476,6 +490,7 @@ fn stop(jobs: &mut Vec<Job>, running: std::sync::Arc<AtomicBool>) {
 
 fn start(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Result<()> {
   // Starting the tasks
+  println!("task_file_path {task_file_path:?}");
   let task_file = std::fs::read_to_string(task_file_path).or_else(|e| {
     Err(anyhow::anyhow!(
       "could not open {:?}: {}",
@@ -495,6 +510,7 @@ fn start(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
   {
     let mut jobs = jobs.lock().unwrap();
     for task in tasks {
+      println!("start task {task:?}");
       let (child, stdout_path, stderr_path) = start_task(&task)?;
 
       let _ = jobs.push(Job {
@@ -711,11 +727,16 @@ fn main() -> Result<()> {
       start(&config, &task_file_path, socket_path)?;
       None
     }
-    Some(Command::List) | None => {
+    Some(Command::List) |
+    None => {
       // By default, just lists the tasks
-      let mut socket = UnixStream::connect(socket_path)?;
-      send(&mut socket, &Request::List {})?;
-      receive(&mut socket)?
+      if let Ok(mut socket) = UnixStream::connect(socket_path) {
+        send(&mut socket, &Request::List {})?;
+        receive(&mut socket)?
+      } else {
+        eprintln!("no runner server found");
+        None
+      }
     }
     Some(Command::Stop { pid }) => {
       let mut socket = UnixStream::connect(socket_path)?;
