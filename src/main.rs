@@ -52,6 +52,8 @@ enum Command {
   Start { pid: u32 },
   /// Restart the task identified by pid
   Restart { pid: u32 },
+  /// Tail the standard output and error
+  Tail { pid: u32 },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -777,7 +779,42 @@ fn main() -> Result<()> {
       let mut socket = UnixStream::connect(socket_path)?;
       send(&mut socket, &Request::Start { pid: *pid })?;
       receive(&mut socket)?
-    }
+    },
+    &Some(Command::Tail { pid }) => {
+      // None
+      // Get the list of tasks
+      let mut socket = UnixStream::connect(socket_path)?;
+      send(&mut socket, &Request::List {})?;
+      let response = receive(&mut socket)?;
+      // Look for the requested PID
+      match response {
+        Some(Response::List { jobs }) => {
+          let job = jobs.iter().find(|j| j.pid == pid).ok_or(anyhow::anyhow!("no pid {pid}"))?;
+          println!("reading {:?}", job.stdout_path);
+          let mut stdout = std::io::BufReader::new(std::fs::File::open(&job.stdout_path).unwrap());
+          let mut stderr = std::io::BufReader::new(std::fs::File::open(&job.stderr_path).unwrap());
+          let mut linebuf;
+          loop {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            linebuf = "".to_string();
+            loop {
+              match stdout.read_line(&mut linebuf) {
+                Ok(count) if count != 0 => print!("{linebuf}"),
+                _ => break,
+              }
+            }
+            linebuf = "".to_string();
+            loop {
+              match stderr.read_line(&mut linebuf) {
+                Ok(count) if count != 0 => print!("{linebuf}"),
+                _ => break,
+              }
+            }
+          }
+        },
+        _ => anyhow::bail!("unexpected response type: {response:?}"),
+      }
+    },
   };
 
   match response {

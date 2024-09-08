@@ -22,3 +22,8 @@
     TITI: Home is
     TOTO: ${HOME}
   command: bash -c 'echo ${TITI} ${TOTO}'
+- current_dir: ~/
+  name: logger
+  stdout: /tmp/runner.logger
+  command: bash -c 'while true; do   echo "log";   sleep 1s; done'
+  restart: true
