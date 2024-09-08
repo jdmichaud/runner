@@ -7,11 +7,18 @@
   restart: true
   restart_delay: 10
 - current_dir: ~/
-  command: echo "this is a very long command that better be truncated"
+  name: echo-test
+  command: echo "this is a very long command that better be truncated ${TOTO}"
 - current_dir: ~/
-  command: sleep 2s
+  command: sleep 20s
   restart: true
   restart_max: 3
 - current_dir: ~/
+  stderr: /tmp/http.server.8888.stderr.log
   # Check that runner kills all its descendent when terminating
   command: bash -c 'python3 -m http.server 8888'
+- current_dir: ~/
+  environment:
+    TITI: Home is
+    TOTO: ${HOME}
+  command: bash -c 'echo ${TITI} ${TOTO}'

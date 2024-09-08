@@ -224,18 +224,38 @@ fn start_task(task: &Task) -> Result<(std::process::Child, PathBuf, PathBuf)> {
   };
   let stderr = std::fs::File::create(&stderr_path)?;
   let mut command = std::process::Command::new(&prog);
+
+  // Create the command
   let command = command
     .stdout(stdout)
     .stderr(stderr)
     .stdin(std::process::Stdio::null())
     .args(split.collect::<Vec<String>>())
     .current_dir(current_dir.as_ref());
+
+  // Interpolate environment variable withing the values
   if let Some(environment) = &task.environment {
-    command.envs(environment);
+    let mut environment_interpolated = HashMap::<String, String>::new();
+    for (key, value) in environment.into_iter() {
+      use regex::Regex;
+      // Look for ${VARIABLE}
+      let re = Regex::new(r"\$\{([^\}]*)\}").unwrap();
+      let mut interpolated_value = value.clone();
+      for (_, [var]) in re.captures_iter(value).map(|c| c.extract()) {
+        if let Ok(varvalue) = std::env::var(var) {
+          interpolated_value = interpolated_value.replace(&format!("${{{var}}}"), &varvalue);
+        }
+      }
+      environment_interpolated.insert(key.to_string(), interpolated_value);
+    }
+    command.envs(environment_interpolated);
   }
+
+  // Set argv[0] to a name if defined in the config
   if let Some(name) = &task.name {
     command.arg0(&name);
   }
+
   let child = match command.spawn() {
     Ok(child) => child,
     Err(e) => anyhow::bail!("could not start {}: {}", &prog, e),
@@ -490,7 +510,6 @@ fn stop(jobs: &mut Vec<Job>, running: std::sync::Arc<AtomicBool>) {
 
 fn start(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Result<()> {
   // Starting the tasks
-  println!("task_file_path {task_file_path:?}");
   let task_file = std::fs::read_to_string(task_file_path).or_else(|e| {
     Err(anyhow::anyhow!(
       "could not open {:?}: {}",
@@ -510,7 +529,6 @@ fn start(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
   {
     let mut jobs = jobs.lock().unwrap();
     for task in tasks {
-      println!("start task {task:?}");
       let (child, stdout_path, stderr_path) = start_task(&task)?;
 
       let _ = jobs.push(Job {
