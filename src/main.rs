@@ -54,6 +54,8 @@ enum Command {
   Restart { pid: u32 },
   /// Tail the standard output and error
   Tail { pid: u32 },
+  /// Show the details of a process
+  Show { pid: u32 },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -815,6 +817,21 @@ fn main() -> Result<()> {
         _ => anyhow::bail!("unexpected response type: {response:?}"),
       }
     },
+    &Some(Command::Show { pid }) => {
+      // Get the list of tasks
+      let mut socket = UnixStream::connect(socket_path)?;
+      send(&mut socket, &Request::List {})?;
+      let response = receive(&mut socket)?;
+      // Look for the requested PID
+      match response {
+        Some(Response::List { jobs }) => {
+          let job = jobs.iter().find(|j| j.pid == pid).ok_or(anyhow::anyhow!("no pid {pid}"))?;
+          println!("{}", serde_json::to_string(job)?);
+        },
+        _ => anyhow::bail!("unexpected response type: {response:?}"),
+      }
+      None
+    }
   };
 
   match response {
