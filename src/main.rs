@@ -76,7 +76,9 @@ enum Response {
   List {
     jobs: Vec<JobRepr>,
   },
-  Message { message: String },
+  Message {
+    message: String,
+  },
   None,
 }
 
@@ -204,7 +206,6 @@ fn start_task(task: &Task) -> Result<(std::process::Child, PathBuf, PathBuf)> {
 
   use rand::distributions::Alphanumeric;
   use rand::Rng;
-
   let mut rng = rand::thread_rng();
   let random_suffix: String = std::iter::repeat(())
     .map(|()| rng.sample(Alphanumeric))
@@ -212,21 +213,23 @@ fn start_task(task: &Task) -> Result<(std::process::Child, PathBuf, PathBuf)> {
     .take(5)
     .collect();
   let stdout_path = if let Some(stdout_path) = &task.stdout {
-    PathBuf::from(stdout_path)
+    PathBuf::from(shellexpand::full(stdout_path).unwrap().to_string())
   } else {
     let mut stdout_path = std::env::temp_dir();
     stdout_path.push("out".to_string() + &random_suffix);
     stdout_path
   };
-  let stdout = std::fs::File::create(&stdout_path)?;
+  let stdout = std::fs::File::create(&stdout_path)
+    .or_else(|e| Err(anyhow::anyhow!("{e}: {:?}", stdout_path)))?;
   let stderr_path = if let Some(stderr_path) = &task.stderr {
-    PathBuf::from(stderr_path)
+    PathBuf::from(shellexpand::full(stderr_path).unwrap().to_string())
   } else {
     let mut stderr_path = std::env::temp_dir();
     stderr_path.push("err".to_string() + &random_suffix);
     stderr_path
   };
-  let stderr = std::fs::File::create(&stderr_path)?;
+  let stderr = std::fs::File::create(&stderr_path)
+    .or_else(|e| Err(anyhow::anyhow!("{e}: {:?}", stderr_path)))?;
   let mut command = std::process::Command::new(&prog);
 
   // Create the command
@@ -657,7 +660,7 @@ fn start(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
             stop(&mut jobs.lock().unwrap(), running.clone());
             let _ = send(&mut socket, &Response::None);
             std::process::exit(0);
-          },
+          }
           Request::Kill { pid } => {
             let mut found = false;
             for job in jobs.lock().unwrap().iter_mut() {
@@ -678,7 +681,7 @@ fn start(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
               let message = format!("Couldn't find job {}", pid);
               let _ = send(&mut socket, &Response::Message { message });
             }
-          },
+          }
           Request::Start { pid } => {
             let mut found = false;
             for job in jobs.lock().unwrap().iter_mut() {
@@ -708,7 +711,7 @@ fn start(_config: &Config, task_file_path: &PathBuf, socket_path: &str) -> Resul
               let message = format!("Couldn't find job {}", pid);
               let _ = send(&mut socket, &Response::Message { message });
             }
-          },
+          }
         }
       }
       Err(e) => {
@@ -749,8 +752,7 @@ fn main() -> Result<()> {
       start(&config, &task_file_path, socket_path)?;
       None
     }
-    Some(Command::List) |
-    None => {
+    Some(Command::List) | None => {
       // By default, just lists the tasks
       if let Ok(mut socket) = UnixStream::connect(socket_path) {
         send(&mut socket, &Request::List {})?;
@@ -781,7 +783,7 @@ fn main() -> Result<()> {
       let mut socket = UnixStream::connect(socket_path)?;
       send(&mut socket, &Request::Start { pid: *pid })?;
       receive(&mut socket)?
-    },
+    }
     &Some(Command::Tail { pid }) => {
       // None
       // Get the list of tasks
@@ -791,7 +793,10 @@ fn main() -> Result<()> {
       // Look for the requested PID
       match response {
         Some(Response::List { jobs }) => {
-          let job = jobs.iter().find(|j| j.pid == pid).ok_or(anyhow::anyhow!("no pid {pid}"))?;
+          let job = jobs
+            .iter()
+            .find(|j| j.pid == pid)
+            .ok_or(anyhow::anyhow!("no pid {pid}"))?;
           println!("reading {:?}", job.stdout_path);
           let mut stdout = std::io::BufReader::new(std::fs::File::open(&job.stdout_path).unwrap());
           let mut stderr = std::io::BufReader::new(std::fs::File::open(&job.stderr_path).unwrap());
@@ -813,10 +818,10 @@ fn main() -> Result<()> {
               }
             }
           }
-        },
+        }
         _ => anyhow::bail!("unexpected response type: {response:?}"),
       }
-    },
+    }
     &Some(Command::Show { pid }) => {
       // Get the list of tasks
       let mut socket = UnixStream::connect(socket_path)?;
@@ -825,9 +830,12 @@ fn main() -> Result<()> {
       // Look for the requested PID
       match response {
         Some(Response::List { jobs }) => {
-          let job = jobs.iter().find(|j| j.pid == pid).ok_or(anyhow::anyhow!("no pid {pid}"))?;
+          let job = jobs
+            .iter()
+            .find(|j| j.pid == pid)
+            .ok_or(anyhow::anyhow!("no pid {pid}"))?;
           println!("{}", serde_json::to_string(job)?);
-        },
+        }
         _ => anyhow::bail!("unexpected response type: {response:?}"),
       }
       None
@@ -836,7 +844,7 @@ fn main() -> Result<()> {
 
   match response {
     Some(Response::List { jobs }) => render(&jobs),
-    Some(Response::None) | None => {},
+    Some(Response::None) | None => {}
     Some(Response::Message { message }) => println!("{}", message),
   }
 
